@@ -50,5 +50,9 @@
         public const string TimesProgId = BaseNamespace + "Times";
 
         public const string DebugAddinObject = BaseNamespace + "VBETypeLibsAPI";
+
+        // Headless test runner (design D5): required for the ComVisibleTypeAnalyzer gate --
+        // see the matching comment in RubberduckGuid.cs.
+        public const string TestRunnerProgId = BaseNamespace + "TestRunner";
     }
 }

@@ -57,6 +57,13 @@
         public const string ParamsDirGuid = UnitTestingGuidspace + "5E" + GuidSuffix;
         public const string ParamsFileCopyGuid = UnitTestingGuidspace + "5F" + GuidSuffix;
         public const string IMockProviderGuid = UnitTestingGuidspace + "F2" + GuidSuffix;
+        // Headless test runner (design D5): the fork's ComVisibleTypeAnalyzer requires every
+        // COM-visible type's Guid/ProgId attribute to reference a RubberduckGuid/RubberduckProgId
+        // constant by source text, so these two constants must exist for RubberduckTestRunner
+        // and IRubberduckTestRunner to compile -- full wiring (IoC registration, Extension.cs
+        // Object assignment) remains out of scope until the wiring slice.
+        public const string TestRunnerGuid = UnitTestingGuidspace + "F3" + GuidSuffix;
+        public const string ITestRunnerGuid = UnitTestingGuidspace + "F4" + GuidSuffix;
         public const string MockProviderGuid = UnitTestingGuidspace + "E3" + GuidSuffix;
         public const string IComMockGuid = UnitTestingGuidspace + "E4" + GuidSuffix;
         public const string ComMockGuid = UnitTestingGuidspace + "E5" + GuidSuffix;

@@ -1,15 +1,18 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
+using Rubberduck.Resources.Registration;
 
 namespace Rubberduck.UnitTesting
 {
     /// <summary>
-    /// Automation adapter over the unchanged <see cref="ITestEngine"/> (design D5). Owns only
-    /// name-based selection resolution and JSON translation, plus a small run state machine:
-    /// Idle -&gt; Starting -&gt; Running -&gt; {Complete | Cancelled | Faulted}, with NoTestsMatched
-    /// as a terminal shortcut out of Starting.
+    /// COM-visible automation adapter over the unchanged <see cref="ITestEngine"/> (design D5).
+    /// Owns only name-based selection resolution and JSON translation, plus a small run state
+    /// machine: Idle -&gt; Starting -&gt; Running -&gt; {Complete | Cancelled | Faulted}, with
+    /// NoTestsMatched as a terminal shortcut out of Starting.
     /// </summary>
     /// <remarks>
     /// Threading: every port method and every engine event handler run on the Excel STA main
@@ -20,11 +23,22 @@ namespace Rubberduck.UnitTesting
     /// safety"). <see cref="GetResults"/> therefore returns an immutable snapshot and never
     /// mutates state, and <see cref="IsComplete"/> is a plain field read.
     ///
-    /// COM visibility (the <c>IRubberduckTestRunner</c> interface implementation and its
-    /// ComVisible/Guid/ProgId/ClassInterface/ComDefaultInterface attributes) is added in a
-    /// separate follow-up commit/PR (task 3.11), kept out of this review-budget-sized unit.
+    /// GUID/ProgId <em>registration and wiring</em> (IoC container, <c>Extension.cs</c> Object
+    /// assignment) are added in the wiring slice (PR5, tasks 4.1-4.4). The
+    /// <see cref="RubberduckGuid.TestRunnerGuid"/>/<see cref="RubberduckProgId.TestRunnerProgId"/>
+    /// constants themselves had to be added alongside this file because the fork's
+    /// ComVisibleTypeAnalyzer requires every COM-visible type's Guid/ProgId attribute to
+    /// reference those constants by source text -- a literal string does not satisfy it.
     /// </remarks>
-    public class RubberduckTestRunner
+    [
+        ComVisible(true),
+        Guid(RubberduckGuid.TestRunnerGuid),
+        ProgId(RubberduckProgId.TestRunnerProgId),
+        ClassInterface(ClassInterfaceType.None),
+        ComDefaultInterface(typeof(IRubberduckTestRunner)),
+        EditorBrowsable(EditorBrowsableState.Always)
+    ]
+    public class RubberduckTestRunner : IRubberduckTestRunner
     {
         private enum RunState
         {
