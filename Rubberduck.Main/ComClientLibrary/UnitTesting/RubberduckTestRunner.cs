@@ -109,7 +109,10 @@ namespace Rubberduck.UnitTesting
 
         public string ParserStatus => _parserStatus?.Invoke() ?? string.Empty;
 
-        public int DiscoveredTestCount => _engine.Tests.Count();
+        // engine.Tests is null until the parser's first successful Ready transition
+        // (TestEngine only assigns its backing field from inside its own StateChangedHandler),
+        // so a COM client asking before that point must see 0, not an exception.
+        public int DiscoveredTestCount => _engine.Tests?.Count() ?? 0;
 
         public bool IsComplete => _state != RunState.Starting && _state != RunState.Running;
 
@@ -127,14 +130,15 @@ namespace Rubberduck.UnitTesting
                 return string.Empty;
             }
 
-            if (!_engine.CanRun)
+            var discoveredTests = _engine.Tests;
+            if (!_engine.CanRun || discoveredTests is null)
             {
                 SetError("NOT_READY", "The parser is not in a state that allows a test run.");
                 return string.Empty;
             }
 
             var resolution = TestSelectionResolver.Resolve(
-                _engine.Tests,
+                discoveredTests,
                 t => t.Declaration.ComponentName,
                 t => t.Declaration.IdentifierName,
                 ModuleName,
