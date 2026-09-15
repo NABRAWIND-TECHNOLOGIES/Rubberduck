@@ -186,7 +186,12 @@ namespace Rubberduck.UnitTesting
                 "}";
         }
 
-        private static string SerializeError(HeadlessErrorInfo error)
+        /// <summary>
+        /// Serializes a standalone <see cref="HeadlessErrorInfo"/> -- reused by
+        /// <c>RubberduckTestRunner.LastError</c> (design D5), which needs the exact
+        /// <c>{code,message,detail}</c> shape without the surrounding result envelope.
+        /// </summary>
+        internal static string SerializeError(HeadlessErrorInfo error)
         {
             return "{" +
                 $"\"code\":{JsonString(error.Code)}," +
