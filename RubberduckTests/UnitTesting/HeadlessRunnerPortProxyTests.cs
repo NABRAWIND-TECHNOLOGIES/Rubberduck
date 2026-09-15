@@ -1,4 +1,3 @@
-using System;
 using System.Linq;
 using Newtonsoft.Json.Linq;
 using NUnit.Framework;
@@ -48,7 +47,10 @@ namespace RubberduckTests.UnitTesting
             Assert.AreEqual("StartupPending", proxy.ParserStatus);
             Assert.AreEqual(0, proxy.DiscoveredTestCount);
             Assert.IsFalse(proxy.IsComplete);
-            Assert.IsTrue(proxy.Version.EndsWith("-headless", StringComparison.Ordinal));
+            // Fork version string decision: the unbound fallback is the shared
+            // AssemblyInformationalVersion (e.g. "2.5.9-headless.1"), not a numeric
+            // AssemblyVersion + "-headless" suffix.
+            StringAssert.Contains("-headless", proxy.Version);
             Assert.AreEqual(1, proxy.SchemaVersion);
         }
 
