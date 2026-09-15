@@ -279,7 +279,10 @@ namespace Rubberduck
                 // is trying to keep invisible.
                 if (!isAutomationActive && (_initialSettings?.CanShowSplash ?? false))
                 {
-                    splash = new Splash2021(string.Format(RubberduckUI.Rubberduck_AboutBuild, Assembly.GetExecutingAssembly().GetName().Version.ToString(3)));
+                    // Fork version string decision: shows the fork-distinguishing
+                    // AssemblyInformationalVersion (e.g. "2.5.9-headless.1") rather than the
+                    // plain numeric AssemblyVersion.
+                    splash = new Splash2021(string.Format(RubberduckUI.Rubberduck_AboutBuild, HeadlessRunnerVersion.Current));
                     splash.Show();
                     splash.Refresh();
                 }

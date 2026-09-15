@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using Rubberduck.Resources.Registration;
 
@@ -69,8 +68,7 @@ namespace Rubberduck.UnitTesting
             _preBindError = new HeadlessErrorInfo("STARTUP_FAILED", "Rubberduck's startup sequence failed.", detail);
         }
 
-        public string Version => _target?.Version
-            ?? Assembly.GetExecutingAssembly().GetName().Version.ToString() + "-headless";
+        public string Version => _target?.Version ?? HeadlessRunnerVersion.Current;
 
         public int SchemaVersion => _target?.SchemaVersion ?? TestResultJsonSerializer.SchemaVersion;
 

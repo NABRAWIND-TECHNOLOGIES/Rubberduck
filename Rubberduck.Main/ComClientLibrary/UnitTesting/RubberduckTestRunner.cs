@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using Rubberduck.Automation;
 using Rubberduck.Resources.Registration;
@@ -112,7 +111,7 @@ namespace Rubberduck.UnitTesting
             _engine.TestRunCompleted += OnTestRunCompleted;
         }
 
-        public string Version => Assembly.GetExecutingAssembly().GetName().Version.ToString() + "-headless";
+        public string Version => HeadlessRunnerVersion.Current;
 
         public int SchemaVersion => TestResultJsonSerializer.SchemaVersion;
 

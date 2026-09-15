@@ -22,6 +22,12 @@
     <!-- Declare a Version if it's not already declared as a global property through MSBuild invocation -->
     <Version Condition=" '$(Version)' == '' ">2.5.9.1</Version>
     <!-- all other relevant version numbers are computed from Version automagically -->
+    <!-- Fork version string decision (headless-test-runner): overrides the SDK's default
+         AssemblyInformationalVersion (which would otherwise just repeat Version), so every
+         build of this fork is distinguishable from stock Rubberduck at a glance, in the
+         splash/About window text and in IRubberduckTestRunner.Version. AssemblyVersion and
+         AssemblyFileVersion, both driven by Version above, are deliberately left numeric-only. -->
+    <InformationalVersion Condition=" '$(InformationalVersion)' == '' ">2.5.9-headless.1</InformationalVersion>
   </PropertyGroup>
 
   <PropertyGroup Condition=" $(UnifyOutputPath) ">
