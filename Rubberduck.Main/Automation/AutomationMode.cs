@@ -67,6 +67,16 @@ namespace Rubberduck.Automation
         public bool IsActive => TryRead(out _);
 
         /// <summary>
+        /// Startup failure recorded under automation (design "Headless UI Suppression" / D8):
+        /// a condition that would have shown a startup <c>MessageBox</c> instead sets this and
+        /// logs <c>Fatal</c>, so the test runner port's <c>LastError</c> can surface
+        /// <c>STARTUP_FAILED</c> to the CLI instead of a dialog no one is present to dismiss.
+        /// <c>null</c> means startup has not (yet) failed. Process-wide by design: there is
+        /// exactly one add-in startup sequence per Excel process.
+        /// </summary>
+        public static string StartupError { get; set; }
+
+        /// <summary>
         /// Reads and validates this process's marker file, if any. Returns <c>false</c> - never
         /// throws - for an absent, stale, malformed, or unreadable marker, which is the fail-safe
         /// behaviour the port relies on to fall back to stock (interactive) behaviour.

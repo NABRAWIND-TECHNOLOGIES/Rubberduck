@@ -11,6 +11,7 @@ using Component = Castle.MicroKernel.Registration.Component;
 using Castle.MicroKernel.Resolvers.SpecializedResolvers;
 using Castle.MicroKernel.SubSystems.Configuration;
 using Castle.Windsor;
+using Rubberduck.Automation;
 using Rubberduck.AutoComplete;
 using Rubberduck.CodeAnalysis.CodeMetrics;
 using Rubberduck.CodeAnalysis.Inspections;
@@ -33,6 +34,7 @@ using Rubberduck.Parsing.VBA.DeclarationResolving;
 using Rubberduck.Parsing.VBA.Parsing;
 using Rubberduck.Parsing.VBA.Parsing.ParsingExceptions;
 using Rubberduck.Parsing.VBA.ReferenceManagement;
+using Rubberduck.Interaction;
 using Rubberduck.Refactorings;
 using Rubberduck.Runtime;
 using Rubberduck.Settings;
@@ -103,6 +105,7 @@ namespace Rubberduck.Root
             RegisterFileSystem(container);
             RegisterInstances(container);
             RegisterAppWithSpecialDependencies(container);
+            RegisterHeadlessMessageBoxIfActive(container);
             RegisterUnitTestingComSide(container);
 
             container.Register(Component.For<Version>()
@@ -195,6 +198,23 @@ namespace Rubberduck.Root
                 .LifestyleSingleton());
             container.Register(Component.For<ITestEngine>()
                 .ImplementedBy<TestEngine>()
+                .LifestyleSingleton());
+            // Headless automation port (design D5): adapts the unchanged ITestEngine above.
+            // ParserStatus/RequestParse have no direct ITestEngine equivalent, so they are
+            // wired here from the already-registered parser state services.
+            container.Register(Component.For<IRubberduckTestRunner>()
+                .ImplementedBy<RubberduckTestRunner>()
+                .UsingFactoryMethod(kernel =>
+                {
+                    var parserStatus = kernel.Resolve<IParserStatusProvider>();
+                    var parseManager = kernel.Resolve<IParseManager>();
+                    return new RubberduckTestRunner(
+                        kernel.Resolve<ITestEngine>(),
+                        clock: null,
+                        runIdFactory: null,
+                        parserStatus: () => parserStatus.Status.ToString(),
+                        requestParse: () => parseManager.OnParseRequested(nameof(RubberduckTestRunner)));
+                })
                 .LifestyleSingleton());
 
             var assembliesToRegister = AssembliesToRegister().ToArray();
@@ -1200,7 +1220,32 @@ namespace Rubberduck.Root
                 .Named(nameof(VersionCheckCommand))
                 .LifestyleSingleton());
             container.Register(Component.For<App>()
-                .DependsOn(Dependency.OnComponent<CommandBase, VersionCheckCommand>())
+                .DependsOn(Dependency.OnComponent<CommandBase, VersionCheckCommand>(),
+                    Dependency.OnValue("automationModeActive", AutomationMode.Current.IsActive))
+                .LifestyleSingleton());
+        }
+
+        /// <summary>
+        /// Under automation (design D8/D9 item 3), <see cref="IMessageBox"/> is bound to a
+        /// non-interactive implementation instead of the convention-registered
+        /// <c>Rubberduck.Interaction.MessageBox</c> (wired further down by
+        /// <see cref="ApplyDefaultInterfaceConvention"/>). Registered before that convention
+        /// scan runs, so this explicit registration -- not the convention one -- wins resolution.
+        /// With no automation marker present this method registers nothing, so the interactive
+        /// GUI path is completely unaffected.
+        /// </summary>
+        private void RegisterHeadlessMessageBoxIfActive(IWindsorContainer container)
+        {
+            if (!AutomationMode.Current.IsActive)
+            {
+                return;
+            }
+
+            var logger = NLog.LogManager.GetLogger(nameof(HeadlessMessageBox));
+            Action<string> logSink = message => logger.Info(message);
+            container.Register(Component.For<IMessageBox>()
+                .ImplementedBy<HeadlessMessageBox>()
+                .DependsOn(Dependency.OnValue<Action<string>>(logSink))
                 .LifestyleSingleton());
         }
 

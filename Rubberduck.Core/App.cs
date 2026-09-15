@@ -1,4 +1,4 @@
-﻿using Infralution.Localization.Wpf;
+using Infralution.Localization.Wpf;
 using NLog;
 using Rubberduck.Common;
 using Rubberduck.Interaction;
@@ -31,9 +31,10 @@ namespace Rubberduck
         private readonly CommandBase _checkVersionCommand;
 
         private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
-        
+
         private Configuration _config;
         private IFileSystem _filesystem;
+        private readonly bool _automationModeActive;
 
         public App(IMessageBox messageBox,
             IConfigurationService<Configuration> configService,
@@ -41,7 +42,8 @@ namespace Rubberduck
             IRubberduckHooks hooks,
             IVersionCheckService version,
             CommandBase checkVersionCommand,
-            IFileSystem filesystem)
+            IFileSystem filesystem,
+            bool automationModeActive = false)
         {
             _messageBox = messageBox;
             _configService = configService;
@@ -52,6 +54,11 @@ namespace Rubberduck
 
             _configService.SettingsChanged += _configService_SettingsChanged;
             _filesystem = filesystem;
+            // Rubberduck.Core cannot reference Rubberduck.Main's AutomationMode (dependency
+            // direction runs the other way), so the decision itself is made in Main and handed
+            // in here as a plain bool -- this class stays testable without any automation
+            // concept of its own.
+            _automationModeActive = automationModeActive;
 
             UiContextProvider.Initialize();
         }
@@ -85,7 +92,7 @@ namespace Rubberduck
 
         private void EnsureTempPathExists()
         {
-            // This is required by the parser - allow this to throw. 
+            // This is required by the parser - allow this to throw.
             if (!_filesystem.Directory.Exists(ApplicationConstants.RUBBERDUCK_TEMP_PATH))
             {
                 _filesystem.Directory.CreateDirectory(ApplicationConstants.RUBBERDUCK_TEMP_PATH);
@@ -111,7 +118,7 @@ namespace Rubberduck
 
         /// <summary>
         /// Ensure that log level is changed to "none" after a successful
-        /// run of Rubberduck for first time. By default, we ship with 
+        /// run of Rubberduck for first time. By default, we ship with
         /// log level set to Trace (0) but once it's installed and has
         /// ran without problem, it should be set to None (6)
         /// </summary>
@@ -135,16 +142,18 @@ namespace Rubberduck
 
             LogRubberduckStart();
             UpdateLoggingLevel();
-            
+
             CheckForLegacyIndenterSettings();
             _appMenus.Initialize();
-            _hooks.HookHotkeys(); // need to hook hotkeys before we localize menus, to correctly display ShortcutTexts            
+            _hooks.HookHotkeys(); // need to hook hotkeys before we localize menus, to correctly display ShortcutTexts
             _appMenus.Localize();
 
-            if (_config.UserSettings.GeneralSettings.CanCheckVersion)
+            // No network call under automation: a headless CLI run must never depend on, or wait
+            // on, an outbound version-check request (design D8).
+            if (_config.UserSettings.GeneralSettings.CanCheckVersion && !_automationModeActive)
             {
                 _checkVersionCommand.Execute(null);
-            }            
+            }
         }
 
         public void Shutdown()
@@ -222,7 +231,7 @@ namespace Rubberduck
                 _config.UserSettings.GeneralSettings.IsSmartIndenterPrompted = true;
                 _configService.Save(_config);
             }
-            catch 
+            catch
             {
                 //Meh.
             }

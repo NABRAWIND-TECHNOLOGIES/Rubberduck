@@ -9,6 +9,7 @@ using Rubberduck.Runtime;
 using Rubberduck.Settings;
 using Rubberduck.SettingsProvider;
 using Rubberduck.UI;
+using Rubberduck.UnitTesting;
 using Rubberduck.VBEditor.ComManagement;
 using Rubberduck.VBEditor.ComManagement.TypeLibs;
 using Rubberduck.VBEditor.Events;
@@ -238,6 +239,12 @@ namespace Rubberduck
                 _container.Resolve<InstanceProvider>();
                 _app = _container.Resolve<App>();
                 _app.Startup();
+
+                // Headless automation port (design D5/P7): assigned only here, once the
+                // container exists, and never in OnConnection -- a client reading
+                // Application.VBE.AddIns(...).Object before Startup() completes must not observe
+                // a half-initialized runner.
+                _addin.Object = _container.Resolve<IRubberduckTestRunner>();
 
                 _isInitialized = true;
             }
