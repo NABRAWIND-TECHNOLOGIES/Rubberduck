@@ -1,6 +1,8 @@
 using System;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO.Abstractions;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
 namespace Rubberduck.Automation
@@ -119,18 +121,38 @@ namespace Rubberduck.Automation
             marker = default;
             try
             {
-                var envelope = JObject.Parse(json);
-                var createdUtc = envelope.Value<DateTime?>("createdUtc");
-                if (createdUtc == null)
+                // DateParseHandling.None keeps "createdUtc" as a raw string token instead of
+                // letting Json.NET auto-convert it to a DateTime tagged with Local/Unspecified
+                // kind based on the machine's time zone. DateTime.SpecifyKind on an
+                // already-zone-adjusted value would silently relabel a wall-clock time as UTC
+                // without converting it -- wrong by exactly the local UTC offset whenever the
+                // marker carries an explicit non-"Z" offset (e.g. "+02:00").
+                JObject envelope;
+                using (var reader = new JsonTextReader(new System.IO.StringReader(json)) { DateParseHandling = DateParseHandling.None })
+                {
+                    envelope = JObject.Load(reader);
+                }
+
+                var createdUtcText = envelope.Value<string>("createdUtc");
+                if (string.IsNullOrEmpty(createdUtcText))
+                {
+                    return false;
+                }
+
+                if (!DateTime.TryParse(
+                        createdUtcText,
+                        CultureInfo.InvariantCulture,
+                        DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
+                        out var createdUtc))
                 {
                     return false;
                 }
 
                 var runId = envelope.Value<string>("runId") ?? string.Empty;
-                marker = new AutomationMarker(DateTime.SpecifyKind(createdUtc.Value, DateTimeKind.Utc), runId);
+                marker = new AutomationMarker(createdUtc, runId);
                 return true;
             }
-            catch (Exception ex) when (ex is Newtonsoft.Json.JsonException || ex is FormatException)
+            catch (Exception ex) when (ex is JsonException || ex is FormatException)
             {
                 return false;
             }

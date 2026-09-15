@@ -2,13 +2,17 @@
 <nlog xmlns="http://www.nlog-project.org/schemas/NLog.xsd"
       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
       autoReload="true">
+  <!-- Empty by default (stock GUI behaviour, unchanged): set to ".<pid>" under headless
+       automation (design D9 item 2, AutomationLogNaming.Suffix) before the first log write, via
+       Extension.InitializeAddIn + LogManager.ReconfigExistingLoggers(). -->
+  <variable name="automationSuffix" value="" />
   <targets>
-    <target 
-      xsi:type="File" 
+    <target
+      xsi:type="File"
       name="file"
-      fileName="${specialfolder:folder=ApplicationData}/Rubberduck/Logs/RubberduckLog.txt"
+      fileName="${specialfolder:folder=ApplicationData}/Rubberduck/Logs/RubberduckLog${var:automationSuffix}.txt"
       layout="${longdate};${uppercase:${level}}-${gdc:item=RubberduckVersion};${logger};${message};${exception:format=tostring}"
-      archiveFileName="${specialfolder:folder=ApplicationData}/Rubberduck/Logs/archives/RubberduckLog.{#}.txt"
+      archiveFileName="${specialfolder:folder=ApplicationData}/Rubberduck/Logs/archives/RubberduckLog${var:automationSuffix}.{#}.txt"
       archiveAboveSize="5242880"
       archiveNumbering="Sequence"
       concurrentWrites="true"

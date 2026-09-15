@@ -43,6 +43,11 @@ namespace Rubberduck.UnitTesting
         private enum RunState
         {
             Idle,
+            // Reserved for a future async hand-off between StartRun validation and the engine
+            // actually starting; StartRun currently transitions Idle/terminal -> Running
+            // directly (engine.Run() call is synchronous from the caller's point of view), so
+            // this value is never assigned today. Kept so IsComplete's guard clause and the
+            // RUN_IN_PROGRESS check stay correct if that hand-off is ever introduced.
             Starting,
             Running,
             Complete,

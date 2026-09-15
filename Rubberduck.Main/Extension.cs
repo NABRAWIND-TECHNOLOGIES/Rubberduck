@@ -1,6 +1,7 @@
 ﻿using Castle.Windsor;
 using Extensibility;
 using NLog;
+using Rubberduck.Automation;
 using Rubberduck.Common.WinAPI;
 using Rubberduck.Resources;
 using Rubberduck.Resources.Registration;
@@ -150,6 +151,9 @@ namespace Rubberduck
         private void InitializeAddIn()
         {
             Splash2021 splash = null;
+            // Read exactly once per call so every decision below (log filename, splash, dialog
+            // suppression) agrees on the same snapshot of automation state (design D8/D9).
+            var isAutomationActive = AutomationMode.Current.IsActive;
             try
             {
                 if (_isInitialized)
@@ -158,6 +162,17 @@ namespace Rubberduck
                     // The strange case of the add-in initialized twice
                     // http://msmvps.com/blogs/carlosq/archive/2013/02/14/the-strange-case-of-the-add-in-initialized-twice.aspx
                     return;
+                }
+
+                // Before the first log write (design D9 item 2): under automation, every log
+                // line for this process lands in its own RubberduckLog.<pid>.txt instead of the
+                // shared RubberduckLog.txt a concurrent instance would otherwise wipe on startup.
+                // An untouched GUI session resolves the variable to "" -- byte-identical to stock.
+                if (LogManager.Configuration != null)
+                {
+                    LogManager.Configuration.Variables["automationSuffix"] =
+                        AutomationLogNaming.Suffix(isAutomationActive, Process.GetCurrentProcess().Id);
+                    LogManager.ReconfigExistingLoggers();
                 }
 
                 var pathProvider = PersistencePathProvider.Instance;
@@ -193,7 +208,10 @@ namespace Rubberduck
                     Debug.Assert(false, "Settings could not be initialized.");
                 }
 
-                if (_initialSettings?.CanShowSplash ?? false)
+                // No splash under automation (design D8/P6): nothing is present to see or
+                // dismiss it, and it costs a real UI window creation on the STA thread the CLI
+                // is trying to keep invisible.
+                if (!isAutomationActive && (_initialSettings?.CanShowSplash ?? false))
                 {
                     splash = new Splash2021(string.Format(RubberduckUI.Rubberduck_AboutBuild, Assembly.GetExecutingAssembly().GetName().Version.ToString(3)));
                     splash.Show();
@@ -202,24 +220,42 @@ namespace Rubberduck
 
                 Startup();
             }
-            catch (Win32Exception)
+            catch (Win32Exception ex)
             {
-                System.Windows.Forms.MessageBox.Show(Resources.RubberduckUI.RubberduckReloadFailure_Message,
-                    RubberduckUI.RubberduckReloadFailure_Title,
-                    MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
+                if (isAutomationActive)
+                {
+                    _logger.Fatal(ex, "Rubberduck reload failed; suppressed under automation.");
+                    AutomationMode.StartupError = "STARTUP_FAILED";
+                }
+                else
+                {
+                    System.Windows.Forms.MessageBox.Show(Resources.RubberduckUI.RubberduckReloadFailure_Message,
+                        RubberduckUI.RubberduckReloadFailure_Title,
+                        MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
+                }
             }
             catch (Exception exception)
             {
                 _logger.Fatal(exception);
-                // TODO Use Rubberduck Interaction instead and provide exception stack trace as
-                // an optional "more info" collapsible section to eliminate the conditional.
-                MessageBox.Show(
+                if (isAutomationActive)
+                {
+                    // No dialog to show, and no one present to dismiss it (design "Headless UI
+                    // Suppression" / D8): the failure is already logged above and now also
+                    // surfaced through the port's LastError instead.
+                    AutomationMode.StartupError = "STARTUP_FAILED";
+                }
+                else
+                {
+                    // TODO Use Rubberduck Interaction instead and provide exception stack trace as
+                    // an optional "more info" collapsible section to eliminate the conditional.
+                    MessageBox.Show(
 #if DEBUG
-                    exception.ToString(),
+                        exception.ToString(),
 #else
-                    exception.Message.ToString(),
+                        exception.Message.ToString(),
 #endif
-                    RubberduckUI.RubberduckLoadFailure, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        RubberduckUI.RubberduckLoadFailure, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             }
             finally
             {

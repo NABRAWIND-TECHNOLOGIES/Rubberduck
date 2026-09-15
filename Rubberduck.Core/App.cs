@@ -1,4 +1,4 @@
-using Infralution.Localization.Wpf;
+﻿using Infralution.Localization.Wpf;
 using NLog;
 using Rubberduck.Common;
 using Rubberduck.Interaction;
@@ -31,7 +31,7 @@ namespace Rubberduck
         private readonly CommandBase _checkVersionCommand;
 
         private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
-
+        
         private Configuration _config;
         private IFileSystem _filesystem;
         private readonly bool _automationModeActive;
@@ -97,7 +97,10 @@ namespace Rubberduck
             {
                 _filesystem.Directory.CreateDirectory(ApplicationConstants.RUBBERDUCK_TEMP_PATH);
             }
-            // The parser swallows the error if deletions fail - clean up any temp files on startup
+            // The parser swallows the error if deletions fail - clean up any temp files on startup.
+            // RUBBERDUCK_TEMP_PATH is per-process (design D9 item 1), so this sweep now only ever
+            // touches this process's own directory -- a second concurrent Excel instance can no
+            // longer delete the first instance's in-flight parser export.
             foreach (var file in _filesystem.DirectoryInfo.FromDirectoryName(ApplicationConstants.RUBBERDUCK_TEMP_PATH).GetFiles())
             {
                 try
@@ -111,6 +114,24 @@ namespace Rubberduck
             }
         }
 
+        private void DeleteTempPathBestEffort()
+        {
+            // Best-effort per-process cleanup (design D9 item 1): never throws, and never blocks
+            // shutdown on a locked file -- the next startup's sweep above already tolerates
+            // leftovers.
+            try
+            {
+                if (_filesystem.Directory.Exists(ApplicationConstants.RUBBERDUCK_TEMP_PATH))
+                {
+                    _filesystem.Directory.Delete(ApplicationConstants.RUBBERDUCK_TEMP_PATH, true);
+                }
+            }
+            catch
+            {
+                // Best-effort only.
+            }
+        }
+
         private void UpdateLoggingLevel()
         {
             LogLevelHelper.SetMinimumLogLevel(LogLevel.FromOrdinal(_config.UserSettings.GeneralSettings.MinimumLogLevel));
@@ -118,7 +139,7 @@ namespace Rubberduck
 
         /// <summary>
         /// Ensure that log level is changed to "none" after a successful
-        /// run of Rubberduck for first time. By default, we ship with
+        /// run of Rubberduck for first time. By default, we ship with 
         /// log level set to Trace (0) but once it's installed and has
         /// ran without problem, it should be set to None (6)
         /// </summary>
@@ -142,10 +163,10 @@ namespace Rubberduck
 
             LogRubberduckStart();
             UpdateLoggingLevel();
-
+            
             CheckForLegacyIndenterSettings();
             _appMenus.Initialize();
-            _hooks.HookHotkeys(); // need to hook hotkeys before we localize menus, to correctly display ShortcutTexts
+            _hooks.HookHotkeys(); // need to hook hotkeys before we localize menus, to correctly display ShortcutTexts            
             _appMenus.Localize();
 
             // No network call under automation: a headless CLI run must never depend on, or wait
@@ -163,12 +184,20 @@ namespace Rubberduck
                 Debug.WriteLine("App calling Hooks.Detach.");
                 _hooks.Detach();
 
-                UpdateLoggingLevelOnShutdown();
+                // The port never writes settings itself, but a settings save on every headless
+                // run would otherwise contend with concurrent batches over the same per-user
+                // settings file for no benefit (design D9 item 3).
+                if (!_automationModeActive)
+                {
+                    UpdateLoggingLevelOnShutdown();
+                }
             }
             catch
             {
                 // Won't matter anymore since we're shutting everything down anyway.
             }
+
+            DeleteTempPathBestEffort();
         }
 
         private void ApplyCultureConfig()
@@ -231,7 +260,7 @@ namespace Rubberduck
                 _config.UserSettings.GeneralSettings.IsSmartIndenterPrompted = true;
                 _configService.Save(_config);
             }
-            catch
+            catch 
             {
                 //Meh.
             }
