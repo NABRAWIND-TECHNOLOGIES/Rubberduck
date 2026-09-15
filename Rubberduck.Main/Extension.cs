@@ -58,6 +58,12 @@ namespace Rubberduck
         private App _app;
         private readonly Logger _logger = LogManager.GetCurrentClassLogger();
 
+        // Hotfix (PR5f, design D5/P7 amendment): placeholder assigned to _addin.Object inside
+        // OnConnection -- see SetAddInObject and Startup() for why the real runner can no longer
+        // be assigned there directly.
+        private HeadlessPortProxy _portProxy;
+        private bool _portProxyIsAddInObject;
+
         public void OnAddInsUpdate(ref Array custom) { }
 
         [SuppressMessage("ReSharper", "InconsistentNaming")]
@@ -67,7 +73,26 @@ namespace Rubberduck
             {
                 _vbe = RootComWrapperFactory.GetVbeWrapper(Application);
                 _addin = RootComWrapperFactory.GetAddInWrapper(AddInInst);
-                _addin.Object = this;
+
+                // Hotfix (PR5f, design D5/P7 amendment): the VBE only accepts an AddIn.Object
+                // assignment while inside OnConnection -- assigning the headless runner later,
+                // in Startup(), throws COMException E_FAIL and broke normal GUI startup for
+                // every user (confirmed by direct user report, 2026-09-15). The proxy is
+                // assigned here, once; Startup() binds the real runner into it afterwards
+                // instead of reassigning .Object. If the proxy assignment itself ever fails,
+                // fall back to stock's own placeholder so the GUI can never break on this line.
+                _portProxy = new HeadlessPortProxy();
+                try
+                {
+                    _addin.Object = _portProxy;
+                    _portProxyIsAddInObject = true;
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warn(ex, "Failed to assign the headless port proxy as the add-in Object; falling back to the interactive object.");
+                    _portProxyIsAddInObject = false;
+                    _addin.Object = this;
+                }
 
                 _vbeNativeApi = new VbeNativeApiAccessor();
                 _beepInterceptor = new BeepInterceptor(_vbeNativeApi);
@@ -97,6 +122,15 @@ namespace Rubberduck
         [Conditional("DEBUG")]
         private void SetAddInObject()
         {
+            // Hotfix (PR5f, design D5/P7 amendment): a Debug build IS the production install
+            // (design D11), so this DEBUG-only convenience must never override the headless port
+            // proxy assigned above -- doing so would silently discard the proxy and reintroduce
+            // the exact GUI startup break this hotfix exists to fix.
+            if (_portProxyIsAddInObject)
+            {
+                return;
+            }
+
             // FOR DEBUGGING/DEVELOPMENT PURPOSES, ALLOW ACCESS TO SOME VBETypeLibsAPI FEATURES FROM VBA
             _addin.Object = new VBETypeLibsAPI_Object(_vbe);
         }
@@ -237,6 +271,7 @@ namespace Rubberduck
                 {
                     _logger.Fatal(ex, "Rubberduck reload failed; suppressed under automation.");
                     AutomationMode.StartupError = "STARTUP_FAILED";
+                    _portProxy?.NotifyStartupFailed(ex.Message);
                 }
                 else
                 {
@@ -254,6 +289,7 @@ namespace Rubberduck
                     // Suppression" / D8): the failure is already logged above and now also
                     // surfaced through the port's LastError instead.
                     AutomationMode.StartupError = "STARTUP_FAILED";
+                    _portProxy?.NotifyStartupFailed(exception.Message);
                 }
                 else
                 {
@@ -287,11 +323,17 @@ namespace Rubberduck
                 _app = _container.Resolve<App>();
                 _app.Startup();
 
-                // Headless automation port (design D5/P7): assigned only here, once the
-                // container exists, and never in OnConnection -- a client reading
-                // Application.VBE.AddIns(...).Object before Startup() completes must not observe
-                // a half-initialized runner.
-                _addin.Object = _container.Resolve<IRubberduckTestRunner>();
+                // Headless automation port (design D5/P7, amended by hotfix PR5f): the real
+                // runner is bound into the proxy already assigned to _addin.Object during
+                // OnConnection, rather than assigned to .Object here directly -- the VBE rejects
+                // an AddIn.Object assignment made outside OnConnection with COMException E_FAIL.
+                // A client reading Application.VBE.AddIns(...).Object before this line runs
+                // still observes the proxy's own safe pre-bind values, never a half-initialized
+                // runner.
+                if (_portProxyIsAddInObject)
+                {
+                    _portProxy.Bind(_container.Resolve<IRubberduckTestRunner>());
+                }
 
                 _isInitialized = true;
             }

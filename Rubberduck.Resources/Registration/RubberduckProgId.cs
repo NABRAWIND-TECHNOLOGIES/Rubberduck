@@ -54,5 +54,9 @@
         // Headless test runner (design D5): required for the ComVisibleTypeAnalyzer gate --
         // see the matching comment in RubberduckGuid.cs.
         public const string TestRunnerProgId = BaseNamespace + "TestRunner";
+
+        // Headless port proxy (hotfix PR5f, design D5/P7 amendment) -- see the matching comment
+        // in RubberduckGuid.cs.
+        public const string TestRunnerProxyProgId = BaseNamespace + "TestRunnerProxy";
     }
 }

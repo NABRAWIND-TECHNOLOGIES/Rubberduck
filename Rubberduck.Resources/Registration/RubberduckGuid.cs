@@ -64,6 +64,12 @@
         // Object assignment) remains out of scope until the wiring slice.
         public const string TestRunnerGuid = UnitTestingGuidspace + "F3" + GuidSuffix;
         public const string ITestRunnerGuid = UnitTestingGuidspace + "F4" + GuidSuffix;
+        // Headless port proxy (hotfix PR5f, design D5/P7 amendment): the VBE only accepts an
+        // AddIn.Object assignment while inside OnConnection, so a placeholder implementing the
+        // same IRubberduckTestRunner interface is what OnConnection actually assigns; Startup()
+        // later binds the real RubberduckTestRunner into it instead of reassigning .Object
+        // outside OnConnection, which throws COMException E_FAIL and broke normal GUI startup.
+        public const string TestRunnerProxyGuid = UnitTestingGuidspace + "F0" + GuidSuffix;
         public const string MockProviderGuid = UnitTestingGuidspace + "E3" + GuidSuffix;
         public const string IComMockGuid = UnitTestingGuidspace + "E4" + GuidSuffix;
         public const string ComMockGuid = UnitTestingGuidspace + "E5" + GuidSuffix;
