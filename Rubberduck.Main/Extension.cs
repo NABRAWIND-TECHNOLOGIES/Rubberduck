@@ -64,6 +64,10 @@ namespace Rubberduck
         private HeadlessPortProxy _portProxy;
         private bool _portProxyIsAddInObject;
 
+        // Design D13: installed only under automation mode, disposed at shutdown -- a GUI
+        // session never installs the WH_CBT hook.
+        private HeadlessDialogInterceptor _dialogInterceptor;
+
         public void OnAddInsUpdate(ref Array custom) { }
 
         [SuppressMessage("ReSharper", "InconsistentNaming")]
@@ -220,6 +224,23 @@ namespace Rubberduck
                     LogManager.ReconfigExistingLoggers();
                 }
 
+                // Design D13: a VBA compile error, MsgBox, or runtime Debug/End prompt raises a
+                // real modal dialog on this thread even with Excel hidden (confirmed, PR5d);
+                // the hook must be installed before any test can run, and never for a GUI
+                // session (isAutomationActive is false there by construction).
+                if (isAutomationActive)
+                {
+                    try
+                    {
+                        _dialogInterceptor = new HeadlessDialogInterceptor(_vbe);
+                        _dialogInterceptor.Install();
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Warn(ex, "Could not install the headless dialog interceptor; a VBE modal dialog may block this run.");
+                    }
+                }
+
                 var pathProvider = PersistencePathProvider.Instance;
                 var configLoader = new XmlPersistenceService<GeneralSettings>(pathProvider, _fileSystem);
                 var configProvider = new GeneralConfigProvider(configLoader);
@@ -366,6 +387,14 @@ namespace Rubberduck
             try
             {
                 _logger.Info("Rubberduck is shutting down.");
+
+                if (_dialogInterceptor != null)
+                {
+                    _logger.Trace("Disposing headless dialog interceptor...");
+                    _dialogInterceptor.Dispose();
+                    _dialogInterceptor = null;
+                }
+
                 _logger.Trace("Unhooking VBENativeServices events...");
                 VbeNativeServices.UnhookEvents();
                 VbeProvider.Terminate();

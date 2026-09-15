@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using Rubberduck.Automation;
 using Rubberduck.Resources.Registration;
 
 namespace Rubberduck.UnitTesting
@@ -61,13 +62,16 @@ namespace Rubberduck.UnitTesting
         private readonly Func<string> _runIdFactory;
         private readonly Func<string> _parserStatus;
         private readonly Action _requestParse;
+        private readonly HeadlessDialogLog _dialogLog;
 
         private readonly List<HeadlessTestResultRecord> _results = new List<HeadlessTestResultRecord>();
+        private readonly List<(DateTime Start, DateTime End)> _consumedDialogWindows = new List<(DateTime Start, DateTime End)>();
         private RunState _state = RunState.Idle;
         private HeadlessSelectionInfo _selection = new HeadlessSelectionInfo("all", null, null);
         private string _runId = string.Empty;
         private DateTime _startedUtc;
         private DateTime _finishedUtc;
+        private DateTime _currentTestStartedUtc;
         private HeadlessErrorInfo? _lastError;
         private bool _cancelRequested;
 
@@ -81,22 +85,29 @@ namespace Rubberduck.UnitTesting
         /// <param name="runIdFactory">Source for run ids; defaults to a new GUID per run.</param>
         /// <param name="parserStatus">Optional source for <see cref="ParserStatus"/>; the engine exposes no parser state directly.</param>
         /// <param name="requestParse">Optional trigger for <see cref="RequestParse"/>; the engine exposes no parse request directly.</param>
+        /// <param name="dialogLog">
+        /// Source of intercepted modal dialogs (design D13); defaults to the per-process
+        /// <see cref="HeadlessDialogLog.Shared"/> instance the interceptor hook writes to.
+        /// </param>
         public RubberduckTestRunner(
             ITestEngine engine,
             Func<DateTime> clock,
             Func<string> runIdFactory,
             Func<string> parserStatus,
-            Action requestParse)
+            Action requestParse,
+            HeadlessDialogLog dialogLog = null)
         {
             _engine = engine ?? throw new ArgumentNullException(nameof(engine));
             _clock = clock ?? (() => DateTime.UtcNow);
             _runIdFactory = runIdFactory ?? (() => Guid.NewGuid().ToString());
             _parserStatus = parserStatus;
             _requestParse = requestParse;
+            _dialogLog = dialogLog ?? HeadlessDialogLog.Shared;
 
             // Subscribed exactly once, for the runner's entire lifetime: StartRun never
             // re-subscribes, so a second run cannot double-count events from the first
             // (design "Single subscription to TestCompleted/TestRunCompleted").
+            _engine.TestStarted += OnTestStarted;
             _engine.TestCompleted += OnTestCompleted;
             _engine.TestRunCompleted += OnTestRunCompleted;
         }
@@ -168,10 +179,12 @@ namespace Rubberduck.UnitTesting
             }
 
             _results.Clear();
+            _consumedDialogWindows.Clear();
             _lastError = null;
             _cancelRequested = false;
             _runId = _runIdFactory();
             _startedUtc = _clock();
+            _currentTestStartedUtc = _startedUtc;
             _state = RunState.Running;
 
             try
@@ -211,6 +224,16 @@ namespace Rubberduck.UnitTesting
             return TestResultJsonSerializer.Serialize(Version, StatusFor(_state), run, snapshot, notRun: 0, error: _lastError);
         }
 
+        private void OnTestStarted(object sender, TestStartedEventArgs e)
+        {
+            if (_state != RunState.Running)
+            {
+                return;
+            }
+
+            _currentTestStartedUtc = _clock();
+        }
+
         private void OnTestCompleted(object sender, TestCompletedEventArgs e)
         {
             if (_state != RunState.Running)
@@ -218,13 +241,37 @@ namespace Rubberduck.UnitTesting
                 return;
             }
 
+            var completedUtc = _clock();
+            var windowStart = _currentTestStartedUtc;
+
+            var outcome = e.Result.Outcome;
+            var message = e.Result.Output;
+            HeadlessDialogDiagnosticInfo? diagnostic = null;
+
+            // A dialog captured while this test was executing (design D13) overrides the
+            // engine's own outcome/message -- the dialog interrupted the test's real
+            // execution, so whatever TestOutcome the interrupted COM call produced is not
+            // trustworthy on its own (spec "the affected test MUST be reported Inconclusive").
+            var dialogEntriesInWindow = _dialogLog.EntriesBetween(windowStart, completedUtc);
+            if (dialogEntriesInWindow.Count > 0)
+            {
+                var dialogEntry = dialogEntriesInWindow[0];
+                var kind = DialogClassifier.Classify(dialogEntry.Caption, dialogEntry.Text);
+                outcome = TestOutcome.Inconclusive;
+                message = DialogDiagnosticFormatter.FormatMessage(kind, dialogEntry.Caption, dialogEntry.Text, dialogEntry.Module, dialogEntry.Line, dialogEntry.Column, dialogEntry.Source);
+                diagnostic = DialogDiagnosticFormatter.BuildDiagnostic(kind, dialogEntry.Caption, dialogEntry.Text, dialogEntry.Module, dialogEntry.Line, dialogEntry.Column, dialogEntry.Source);
+            }
+
+            _consumedDialogWindows.Add((windowStart, completedUtc));
+
             _results.Add(new HeadlessTestResultRecord(
                 e.Test.Declaration.ProjectName,
                 e.Test.Declaration.ComponentName,
                 e.Test.Declaration.IdentifierName,
-                e.Result.Outcome,
-                e.Result.Output,
-                e.Result.Duration));
+                outcome,
+                message,
+                e.Result.Duration,
+                diagnostic));
         }
 
         private void OnTestRunCompleted(object sender, TestRunCompletedEventArgs e)
@@ -235,6 +282,28 @@ namespace Rubberduck.UnitTesting
             }
 
             _finishedUtc = _clock();
+
+            // A dialog captured outside every consumed per-test window (e.g. during module
+            // cleanup, or between the last test and TestRunCompleted) cannot be attributed to
+            // any specific test, so it surfaces at the run level instead (design D13: "a
+            // dialog outside any test window goes to error.detail"). A pre-existing, more
+            // specific error (e.g. ENGINE_FAULT) is never overwritten by this.
+            if (_lastError is null)
+            {
+                var strayEntries = _dialogLog
+                    .EntriesBetween(_startedUtc, _finishedUtc)
+                    .Where(entry => !_consumedDialogWindows.Any(window => entry.TimestampUtc >= window.Start && entry.TimestampUtc < window.End))
+                    .ToList();
+
+                if (strayEntries.Count > 0)
+                {
+                    var strayEntry = strayEntries[0];
+                    var kind = DialogClassifier.Classify(strayEntry.Caption, strayEntry.Text);
+                    var detail = DialogDiagnosticFormatter.FormatMessage(kind, strayEntry.Caption, strayEntry.Text, strayEntry.Module, strayEntry.Line, strayEntry.Column, strayEntry.Source);
+                    SetError("DIALOG_OUTSIDE_TEST_WINDOW", "A VBA dialog appeared outside any test's execution window.", detail);
+                }
+            }
+
             _state = _cancelRequested ? RunState.Cancelled : RunState.Complete;
             _cancelRequested = false;
         }

@@ -12,7 +12,7 @@ namespace Rubberduck.UnitTesting
     /// </summary>
     public readonly struct HeadlessTestResultRecord
     {
-        public HeadlessTestResultRecord(string project, string module, string method, TestOutcome outcome, string message, long durationMs)
+        public HeadlessTestResultRecord(string project, string module, string method, TestOutcome outcome, string message, long durationMs, HeadlessDialogDiagnosticInfo? diagnostic = null)
         {
             Project = project ?? string.Empty;
             Module = module ?? string.Empty;
@@ -20,6 +20,7 @@ namespace Rubberduck.UnitTesting
             Outcome = outcome;
             Message = message ?? string.Empty;
             DurationMs = durationMs;
+            Diagnostic = diagnostic;
         }
 
         public string Project { get; }
@@ -28,6 +29,40 @@ namespace Rubberduck.UnitTesting
         public TestOutcome Outcome { get; }
         public string Message { get; }
         public long DurationMs { get; }
+
+        /// <summary>
+        /// Additive, optional (design D13, schemaVersion stays 1): populated only when a
+        /// captured modal dialog was attached to this test's execution window.
+        /// </summary>
+        public HeadlessDialogDiagnosticInfo? Diagnostic { get; }
+    }
+
+    /// <summary>
+    /// Additive per-test diagnostic detail attached when a captured modal dialog (design D13)
+    /// fell inside a test's execution window. <see cref="Module"/>/<see cref="Line"/>/
+    /// <see cref="Column"/>/<see cref="Source"/> are null unless the dialog was a compile error
+    /// whose source location was successfully read before dismissal.
+    /// </summary>
+    public readonly struct HeadlessDialogDiagnosticInfo
+    {
+        public HeadlessDialogDiagnosticInfo(string kind, string module, int? line, int? column, string source, string dialogCaption, string dialogText)
+        {
+            Kind = kind ?? string.Empty;
+            Module = module;
+            Line = line;
+            Column = column;
+            Source = source;
+            DialogCaption = dialogCaption ?? string.Empty;
+            DialogText = dialogText ?? string.Empty;
+        }
+
+        public string Kind { get; }
+        public string Module { get; }
+        public int? Line { get; }
+        public int? Column { get; }
+        public string Source { get; }
+        public string DialogCaption { get; }
+        public string DialogText { get; }
     }
 
     /// <summary>
@@ -167,6 +202,10 @@ namespace Rubberduck.UnitTesting
 
         private static string SerializeTest(HeadlessTestResultRecord record)
         {
+            var diagnosticJson = record.Diagnostic.HasValue
+                ? $",\"diagnostic\":{SerializeDiagnostic(record.Diagnostic.Value)}"
+                : string.Empty;
+
             return "{" +
                 $"\"project\":{JsonString(record.Project)}," +
                 $"\"module\":{JsonString(record.Module)}," +
@@ -174,6 +213,21 @@ namespace Rubberduck.UnitTesting
                 $"\"outcome\":{JsonString(record.Outcome.ToString())}," +
                 $"\"message\":{JsonString(record.Message)}," +
                 $"\"durationMs\":{record.DurationMs}" +
+                diagnosticJson +
+                "}";
+        }
+
+        /// <summary>Serializes the additive per-test <c>diagnostic</c> object (design D13).</summary>
+        private static string SerializeDiagnostic(HeadlessDialogDiagnosticInfo diagnostic)
+        {
+            return "{" +
+                $"\"kind\":{JsonString(diagnostic.Kind)}," +
+                $"\"module\":{(diagnostic.Module is null ? "null" : JsonString(diagnostic.Module))}," +
+                $"\"line\":{(diagnostic.Line.HasValue ? diagnostic.Line.Value.ToString(CultureInfo.InvariantCulture) : "null")}," +
+                $"\"column\":{(diagnostic.Column.HasValue ? diagnostic.Column.Value.ToString(CultureInfo.InvariantCulture) : "null")}," +
+                $"\"source\":{(diagnostic.Source is null ? "null" : JsonString(diagnostic.Source))}," +
+                $"\"dialogCaption\":{JsonString(diagnostic.DialogCaption)}," +
+                $"\"dialogText\":{JsonString(diagnostic.DialogText)}" +
                 "}";
         }
 
