@@ -153,7 +153,18 @@ namespace Rubberduck
             Splash2021 splash = null;
             // Read exactly once per call so every decision below (log filename, splash, dialog
             // suppression) agrees on the same snapshot of automation state (design D8/D9).
-            var isAutomationActive = AutomationMode.Current.IsActive;
+            // Guarded by its own try/catch (design D8: fail-safe) so a failure while probing
+            // automation state can never escape InitializeAddIn's startup guard -- it just
+            // resolves to interactive/stock behaviour, the same as "no marker present".
+            var isAutomationActive = false;
+            try
+            {
+                isAutomationActive = AutomationMode.Current.IsActive;
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn(ex, "Automation mode detection failed; assuming interactive session.");
+            }
             try
             {
                 if (_isInitialized)
