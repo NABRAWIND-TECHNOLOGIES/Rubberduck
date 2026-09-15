@@ -210,5 +210,33 @@ namespace RubberduckTests.UnitTesting
             StringAssert.Contains("ENGINE_FAULT", runner.LastError);
             Assert.AreEqual("faulted", StatusOf(runner.GetResults()));
         }
+
+        // PR5d: a COM client must never receive an exception from a null-guardable member.
+        // engine.Tests is null before the parser's first successful Ready transition (TestEngine
+        // only assigns its backing field inside StateChangedHandler's else-if branch), so both
+        // DiscoveredTestCount and StartRun's selection resolution must tolerate it explicitly
+        // instead of relying on CanRun alone.
+        [Test]
+        public void DiscoveredTestCount_WhenEngineTestsIsNull_ReturnsZeroInsteadOfThrowing()
+        {
+            var fake = new ControllableFakeEngine { Tests = null };
+            var runner = new RubberduckTestRunner(fake);
+
+            Assert.AreEqual(0, runner.DiscoveredTestCount);
+        }
+
+        [Test]
+        public void StartRun_WhenEngineTestsIsNull_ReturnsNotReadyWithoutRunningEngine()
+        {
+            var fake = new ControllableFakeEngine { Tests = null };
+            var runner = new RubberduckTestRunner(fake);
+
+            var runId = runner.StartRun();
+
+            Assert.AreEqual(string.Empty, runId);
+            Assert.AreEqual(0, fake.RunCallCount);
+            StringAssert.Contains("NOT_READY", runner.LastError);
+            Assert.IsTrue(runner.IsComplete);
+        }
     }
 }
