@@ -281,9 +281,10 @@ namespace Rubberduck.UnitTesting
                         catch (COMException ex)
                         {
                             Logger.Error(ex, "Unexpected COM exception while initializing tests for module {0}. The module will be skipped.", moduleName.Name);
+                            var message = VbaErrorDescriber.Describe(ex);
                             foreach (var method in moduleTestMethods)
                             {
-                                OnTestCompleted(method, new TestResult(TestOutcome.Unknown, AssertMessages.TestRunner_ModuleInitializeFailure));
+                                OnTestCompleted(method, new TestResult(TestOutcome.Unknown, message));
                             }
                             continue;
                         }
@@ -307,7 +308,7 @@ namespace Rubberduck.UnitTesting
                                 }
                                 catch (COMException trace)
                                 {
-                                    OnTestCompleted(test, new TestResult(TestOutcome.Inconclusive, AssertMessages.TestRunner_TestInitializeFailure));
+                                    OnTestCompleted(test, new TestResult(TestOutcome.Inconclusive, VbaErrorDescriber.Describe(trace)));
                                     Logger.Trace(trace, "Unexpected COMException when running TestInitialize");
                                     continue;
                                 }
@@ -388,7 +389,7 @@ namespace Rubberduck.UnitTesting
             catch (COMException e)
             {
                 Logger.Info(e, "Unexpected COM exception while running test method.");
-                return new TestResult(TestOutcome.Inconclusive, AssertMessages.TestRunner_ComException, duration);
+                return new TestResult(TestOutcome.Inconclusive, VbaErrorDescriber.Describe(e), duration);
             }
             catch (Exception e)
             {
