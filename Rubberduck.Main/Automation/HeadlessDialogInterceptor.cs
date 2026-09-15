@@ -31,10 +31,22 @@ namespace Rubberduck.Automation
     /// <c>GetDlgItem(hwnd, IDOK)</c> never found a button and the dialog was left on screen.
     /// Dismissal now enumerates every child window and selects the button by its caption via
     /// <see cref="DialogButtonSelector"/> instead.
+    ///
+    /// D13 addendum (PR5e hotfix follow-up): a compile error leaves the whole VBA project in a
+    /// break state that dismissing the dialog cannot clear by itself. When
+    /// <see cref="DialogClassifier.RequiresProjectReset"/> says so, a second, thread-scoped
+    /// <c>WH_GETMESSAGE</c> hook -- installed alongside the <c>WH_CBT</c> one, on the same
+    /// thread -- picks up a private registered message posted right after dismissal and only
+    /// then runs <see cref="VbeProjectResetter"/>. This deliberately does NOT run the reset
+    /// inside the CBT hook callback itself (still nested inside the dialog's own modal message
+    /// loop at that point): posting the message defers it to the next time this thread's message
+    /// loop retrieves a message, by which point the dialog has already been dismissed.
     /// </remarks>
     public sealed class HeadlessDialogInterceptor : IDisposable
     {
         private const int WH_CBT = 5;
+        private const int WH_GETMESSAGE = 3;
+        private const int HC_ACTION = 0;
         private const int HCBT_CREATEWND = 3;
         private const int HCBT_ACTIVATE = 5;
         private const string DialogClassName = "#32770";
@@ -47,9 +59,22 @@ namespace Rubberduck.Automation
         private const int WM_GETTEXTLENGTH = 0x000E;
         private const int BM_CLICK = 0x00F5;
         private const int IDOK = 1;
+        private const string ResetMessageName = "Rubberduck.HeadlessDialogInterceptor.ResetVbaProject";
 
         private delegate IntPtr HookProc(int code, IntPtr wParam, IntPtr lParam);
         private delegate bool EnumChildProc(IntPtr hwnd, IntPtr lParam);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeMessage
+        {
+            public IntPtr Hwnd;
+            public int Message;
+            public IntPtr WParam;
+            public IntPtr LParam;
+            public uint Time;
+            public int PtX;
+            public int PtY;
+        }
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern IntPtr SetWindowsHookEx(int idHook, HookProc lpfn, IntPtr hMod, int dwThreadId);
@@ -87,63 +112,98 @@ namespace Rubberduck.Automation
         [DllImport("user32.dll")]
         private static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern int RegisterWindowMessage(string lpString);
+
+        [DllImport("user32.dll")]
+        private static extern bool PostThreadMessage(int idThread, int msg, IntPtr wParam, IntPtr lParam);
+
         private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
 
         private readonly IVBE _vbe;
         private readonly HeadlessDialogLog _log;
         private readonly Func<DateTime> _clock;
+        private readonly VbeProjectResetter _resetter;
         private readonly int _threadId;
         private readonly int _processId;
+        private readonly int _resetMessageId;
 
-        // Kept alive for the interceptor's lifetime: the CLR must not collect the delegate
-        // while native code still holds a pointer to it (a classic P/Invoke marshaling pitfall).
+        // Kept alive for the interceptor's lifetime: the CLR must not collect the delegates
+        // while native code still holds a pointer to them (a classic P/Invoke marshaling pitfall).
         private HookProc _hookProc;
         private IntPtr _hookHandle;
+        private HookProc _getMessageHookProc;
+        private IntPtr _getMessageHookHandle;
 
-        public HeadlessDialogInterceptor(IVBE vbe, HeadlessDialogLog log = null, Func<DateTime> clock = null)
+        public HeadlessDialogInterceptor(IVBE vbe, HeadlessDialogLog log = null, Func<DateTime> clock = null, VbeProjectResetter resetter = null)
         {
             _vbe = vbe ?? throw new ArgumentNullException(nameof(vbe));
             _log = log ?? HeadlessDialogLog.Shared;
             _clock = clock ?? (() => DateTime.UtcNow);
+            _resetter = resetter ?? new VbeProjectResetter(vbe);
             _threadId = NativeThreadId();
             _processId = Process.GetCurrentProcess().Id;
+            _resetMessageId = RegisterWindowMessage(ResetMessageName);
         }
 
         public void Install()
         {
-            if (_hookHandle != IntPtr.Zero)
-            {
-                return;
-            }
-
-            _hookProc = HookCallback;
-            _hookHandle = SetWindowsHookEx(WH_CBT, _hookProc, IntPtr.Zero, _threadId);
-
             if (_hookHandle == IntPtr.Zero)
             {
-                var error = Marshal.GetLastWin32Error();
-                Logger.Warn(
-                    "HeadlessDialogInterceptor FAILED to install its WH_CBT hook for thread {0} (process {1}); Win32 error {2}. Modal dialogs will NOT be intercepted.",
-                    _threadId, _processId, error);
+                _hookProc = HookCallback;
+                _hookHandle = SetWindowsHookEx(WH_CBT, _hookProc, IntPtr.Zero, _threadId);
+
+                if (_hookHandle == IntPtr.Zero)
+                {
+                    var error = Marshal.GetLastWin32Error();
+                    Logger.Warn(
+                        "HeadlessDialogInterceptor FAILED to install its WH_CBT hook for thread {0} (process {1}); Win32 error {2}. Modal dialogs will NOT be intercepted.",
+                        _threadId, _processId, error);
+                }
+                else
+                {
+                    Logger.Info(
+                        "HeadlessDialogInterceptor installed WH_CBT hook 0x{0:X} for thread {1} (process {2}).",
+                        _hookHandle.ToInt64(), _threadId, _processId);
+                }
             }
-            else
+
+            if (_getMessageHookHandle == IntPtr.Zero)
             {
-                Logger.Info(
-                    "HeadlessDialogInterceptor installed WH_CBT hook 0x{0:X} for thread {1} (process {2}).",
-                    _hookHandle.ToInt64(), _threadId, _processId);
+                _getMessageHookProc = GetMessageHookCallback;
+                _getMessageHookHandle = SetWindowsHookEx(WH_GETMESSAGE, _getMessageHookProc, IntPtr.Zero, _threadId);
+
+                if (_getMessageHookHandle == IntPtr.Zero)
+                {
+                    var error = Marshal.GetLastWin32Error();
+                    Logger.Warn(
+                        "HeadlessDialogInterceptor FAILED to install its WH_GETMESSAGE hook for thread {0} (process {1}); Win32 error {2}. A compile error will NOT auto-reset the VBA project.",
+                        _threadId, _processId, error);
+                }
+                else
+                {
+                    Logger.Info(
+                        "HeadlessDialogInterceptor installed WH_GETMESSAGE hook 0x{0:X} for thread {1} (reset message id {2}).",
+                        _getMessageHookHandle.ToInt64(), _threadId, _resetMessageId);
+                }
             }
         }
 
         public void Dispose()
         {
-            if (_hookHandle == IntPtr.Zero)
+            if (_hookHandle != IntPtr.Zero)
             {
-                return;
+                UnhookWindowsHookEx(_hookHandle);
+                _hookHandle = IntPtr.Zero;
+                _hookProc = null;
             }
 
-            UnhookWindowsHookEx(_hookHandle);
-            _hookHandle = IntPtr.Zero;
-            _hookProc = null;
+            if (_getMessageHookHandle != IntPtr.Zero)
+            {
+                UnhookWindowsHookEx(_getMessageHookHandle);
+                _getMessageHookHandle = IntPtr.Zero;
+                _getMessageHookProc = null;
+            }
         }
 
         private IntPtr HookCallback(int code, IntPtr wParam, IntPtr lParam)
@@ -167,6 +227,32 @@ namespace Rubberduck.Automation
             }
 
             return CallNextHookEx(_hookHandle, code, wParam, lParam);
+        }
+
+        // Separate WH_GETMESSAGE hook (design D13 addendum): picks up the private message posted
+        // by Dismiss() right after a CompileError dialog is dismissed, and only then -- outside
+        // the WH_CBT callback's own call stack, once the dialog's modal loop has already unwound
+        // past the dismissal -- runs the VBE project reset.
+        private IntPtr GetMessageHookCallback(int code, IntPtr wParam, IntPtr lParam)
+        {
+            try
+            {
+                if (code == HC_ACTION && lParam != IntPtr.Zero)
+                {
+                    var message = (NativeMessage)Marshal.PtrToStructure(lParam, typeof(NativeMessage));
+                    if (message.Message == _resetMessageId)
+                    {
+                        Logger.Info("HeadlessDialogInterceptor received the deferred VBA-project-reset message; attempting reset now.");
+                        _resetter.ResetIfInBreakMode();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "HeadlessDialogInterceptor WH_GETMESSAGE hook callback failed; the VBA project may remain in break mode.");
+            }
+
+            return CallNextHookEx(_getMessageHookHandle, code, wParam, lParam);
         }
 
         private void LogDialogWindowCreated(IntPtr hwnd)
@@ -222,7 +308,7 @@ namespace Rubberduck.Automation
 
             _log.Append(new HeadlessDialogEntry(caption, text, module, line, column, source, _clock()));
 
-            Dismiss(hwnd, DialogClassifier.ActionFor(kind), buttons);
+            Dismiss(hwnd, DialogClassifier.ActionFor(kind), buttons, DialogClassifier.RequiresProjectReset(kind));
         }
 
         private static bool IsDialogClass(IntPtr hwnd)
@@ -271,7 +357,7 @@ namespace Rubberduck.Automation
             }
         }
 
-        private void Dismiss(IntPtr hwnd, DialogDismissAction action, IReadOnlyList<ChildWindowInfo> buttons)
+        private void Dismiss(IntPtr hwnd, DialogDismissAction action, IReadOnlyList<ChildWindowInfo> buttons, bool requiresProjectReset)
         {
             var candidates = buttons
                 .Select(b => new DialogButtonCandidate(b.ControlId, b.Text))
@@ -287,6 +373,7 @@ namespace Rubberduck.Automation
                         "HeadlessDialogInterceptor dismissing dialog 0x{0:X} via BM_CLICK on control id {1} ('{2}').",
                         hwnd.ToInt64(), button.ControlId, button.Text);
                     SendMessage(button.Handle, BM_CLICK, IntPtr.Zero, IntPtr.Zero);
+                    ScheduleProjectResetIfNeeded(requiresProjectReset);
                     return;
                 }
             }
@@ -300,6 +387,7 @@ namespace Rubberduck.Automation
                     "HeadlessDialogInterceptor dismissing dialog 0x{0:X} via WM_COMMAND on fallback IDOK (no captioned button matched).",
                     hwnd.ToInt64());
                 PostMessage(hwnd, WM_COMMAND, (IntPtr)IDOK, IntPtr.Zero);
+                ScheduleProjectResetIfNeeded(requiresProjectReset);
                 return;
             }
 
@@ -308,6 +396,21 @@ namespace Rubberduck.Automation
                 "HeadlessDialogInterceptor dismissing dialog 0x{0:X} via WM_CLOSE fallback (action {1}, no matching button found).",
                 hwnd.ToInt64(), action);
             PostMessage(hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+            ScheduleProjectResetIfNeeded(requiresProjectReset);
+        }
+
+        // D13 addendum: never reset from inside this callback (still nested inside the dialog's
+        // own modal message loop) -- post a private thread message instead, picked up by the
+        // separate WH_GETMESSAGE hook once this thread's message loop moves past the dismissal.
+        private void ScheduleProjectResetIfNeeded(bool requiresProjectReset)
+        {
+            if (!requiresProjectReset)
+            {
+                return;
+            }
+
+            Logger.Info("HeadlessDialogInterceptor posting the deferred VBA-project-reset message (thread {0}).", _threadId);
+            PostThreadMessage(_threadId, _resetMessageId, IntPtr.Zero, IntPtr.Zero);
         }
 
         private struct ChildWindowInfo

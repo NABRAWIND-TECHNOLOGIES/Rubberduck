@@ -60,5 +60,14 @@ namespace Rubberduck.Automation
                     return DialogDismissAction.Close;
             }
         }
+
+        /// <summary>
+        /// Design D13 addendum (PR5e hotfix follow-up): only a compile error leaves the whole
+        /// VBA project in an un-resettable break state that blocks any further code execution
+        /// until an explicit Reset is issued. A runtime Debug/End prompt's "End" click cleanly
+        /// aborts the running Sub instead (confirmed live), and a plain MsgBox never enters break
+        /// mode at all -- neither needs a project reset.
+        /// </summary>
+        public static bool RequiresProjectReset(DialogKind kind) => kind == DialogKind.CompileError;
     }
 }
