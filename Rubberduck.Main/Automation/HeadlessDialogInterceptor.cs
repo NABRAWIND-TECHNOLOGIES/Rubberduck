@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using NLog;
@@ -16,24 +18,38 @@ namespace Rubberduck.Automation
     /// </summary>
     /// <remarks>
     /// Deliberately logic-free plumbing over <see cref="DialogClassifier"/>/
-    /// <see cref="DialogDiagnosticFormatter"/>/<see cref="HeadlessDialogLog"/> (which carry the
-    /// actual, unit-tested decision logic): this class only locates/reads/dismisses the native
-    /// window. Per the design's own Test Strategy, the hook installation itself is wiring-exempt
-    /// and verified only by task 9.6's smoke check against a real modal dialog.
+    /// <see cref="DialogButtonSelector"/>/<see cref="DialogDiagnosticFormatter"/>/
+    /// <see cref="HeadlessDialogLog"/> (which carry the actual, unit-tested decision logic): this
+    /// class only locates/reads/dismisses the native window. Per the design's own Test Strategy,
+    /// the hook installation itself is wiring-exempt and verified only by task 9.6's smoke check
+    /// against a real modal dialog.
+    ///
+    /// PR5e hotfix root cause: the original dismissal assumed the VBE's own dialogs use the
+    /// well-known <c>IDOK</c>/<c>IDCANCEL</c> control ids (1/2), the way a standard
+    /// <c>MessageBox</c> call does. They do not -- the VBE's compile-error and runtime-error
+    /// prompts are hand-authored resources in vbe7.dll with their own arbitrary control ids, so
+    /// <c>GetDlgItem(hwnd, IDOK)</c> never found a button and the dialog was left on screen.
+    /// Dismissal now enumerates every child window and selects the button by its caption via
+    /// <see cref="DialogButtonSelector"/> instead.
     /// </remarks>
     public sealed class HeadlessDialogInterceptor : IDisposable
     {
         private const int WH_CBT = 5;
+        private const int HCBT_CREATEWND = 3;
         private const int HCBT_ACTIVATE = 5;
         private const string DialogClassName = "#32770";
+        private const string ButtonClassName = "Button";
+        private const string StaticClassName = "Static";
+        private const string EditClassName = "Edit";
         private const int WM_COMMAND = 0x0111;
         private const int WM_CLOSE = 0x0010;
         private const int WM_GETTEXT = 0x000D;
         private const int WM_GETTEXTLENGTH = 0x000E;
+        private const int BM_CLICK = 0x00F5;
         private const int IDOK = 1;
-        private const int IDCANCEL = 2;
 
         private delegate IntPtr HookProc(int code, IntPtr wParam, IntPtr lParam);
+        private delegate bool EnumChildProc(IntPtr hwnd, IntPtr lParam);
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern IntPtr SetWindowsHookEx(int idHook, HookProc lpfn, IntPtr hMod, int dwThreadId);
@@ -55,6 +71,12 @@ namespace Rubberduck.Automation
 
         [DllImport("user32.dll")]
         private static extern IntPtr GetDlgItem(IntPtr hDlg, int nIDDlgItem);
+
+        [DllImport("user32.dll")]
+        private static extern int GetDlgCtrlID(IntPtr hWndCtl);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumChildWindows(IntPtr hwndParent, EnumChildProc lpEnumFunc, IntPtr lParam);
 
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
         private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
@@ -96,6 +118,20 @@ namespace Rubberduck.Automation
 
             _hookProc = HookCallback;
             _hookHandle = SetWindowsHookEx(WH_CBT, _hookProc, IntPtr.Zero, _threadId);
+
+            if (_hookHandle == IntPtr.Zero)
+            {
+                var error = Marshal.GetLastWin32Error();
+                Logger.Warn(
+                    "HeadlessDialogInterceptor FAILED to install its WH_CBT hook for thread {0} (process {1}); Win32 error {2}. Modal dialogs will NOT be intercepted.",
+                    _threadId, _processId, error);
+            }
+            else
+            {
+                Logger.Info(
+                    "HeadlessDialogInterceptor installed WH_CBT hook 0x{0:X} for thread {1} (process {2}).",
+                    _hookHandle.ToInt64(), _threadId, _processId);
+            }
         }
 
         public void Dispose()
@@ -116,7 +152,11 @@ namespace Rubberduck.Automation
             // (design: "keep the hook callback minimal and exception-free").
             try
             {
-                if (code == HCBT_ACTIVATE)
+                if (code == HCBT_CREATEWND)
+                {
+                    LogDialogWindowCreated(wParam);
+                }
+                else if (code == HCBT_ACTIVATE)
                 {
                     HandleActivatedWindow(wParam);
                 }
@@ -129,24 +169,47 @@ namespace Rubberduck.Automation
             return CallNextHookEx(_hookHandle, code, wParam, lParam);
         }
 
+        private void LogDialogWindowCreated(IntPtr hwnd)
+        {
+            if (!IsDialogClass(hwnd))
+            {
+                return;
+            }
+
+            GetWindowThreadProcessId(hwnd, out var ownerPid);
+            Logger.Debug(
+                "HeadlessDialogInterceptor observed HCBT_CREATEWND for a {0} window 0x{1:X} (owner pid {2}).",
+                DialogClassName, hwnd.ToInt64(), ownerPid);
+        }
+
         private void HandleActivatedWindow(IntPtr hwnd)
         {
             GetWindowThreadProcessId(hwnd, out var ownerPid);
             if (ownerPid != (uint)_processId)
             {
+                Logger.Trace(
+                    "HeadlessDialogInterceptor ignored HCBT_ACTIVATE for window 0x{0:X}: owned by pid {1}, not this process ({2}).",
+                    hwnd.ToInt64(), ownerPid, _processId);
                 return;
             }
 
-            var className = new StringBuilder(64);
-            GetClassName(hwnd, className, className.Capacity);
-            if (className.ToString() != DialogClassName)
+            if (!IsDialogClass(hwnd))
             {
                 return;
             }
 
             var caption = GetWindowTextSafe(hwnd);
-            var text = GetDialogTextSafe(hwnd);
+            var children = EnumerateChildren(hwnd);
+            var text = FindDialogText(hwnd, children);
+            var buttons = children.Where(c => c.ClassName == ButtonClassName).ToList();
+
+            Logger.Info(
+                "HeadlessDialogInterceptor observed a {0} modal dialog 0x{1:X} (caption '{2}', text '{3}', {4} children, buttons: [{5}]).",
+                DialogClassName, hwnd.ToInt64(), caption, text, children.Count,
+                string.Join(", ", buttons.Select(b => $"{b.ControlId}:'{b.Text}'")));
+
             var kind = DialogClassifier.Classify(caption, text);
+            Logger.Info("HeadlessDialogInterceptor classified dialog 0x{0:X} as {1}.", hwnd.ToInt64(), kind);
 
             string module = null;
             int? line = null;
@@ -159,7 +222,14 @@ namespace Rubberduck.Automation
 
             _log.Append(new HeadlessDialogEntry(caption, text, module, line, column, source, _clock()));
 
-            Dismiss(hwnd, DialogClassifier.ActionFor(kind));
+            Dismiss(hwnd, DialogClassifier.ActionFor(kind), buttons);
+        }
+
+        private static bool IsDialogClass(IntPtr hwnd)
+        {
+            var className = new StringBuilder(64);
+            GetClassName(hwnd, className, className.Capacity);
+            return className.ToString() == DialogClassName;
         }
 
         private void TryReadCompileErrorLocation(out string module, out int? line, out int? column, out string source)
@@ -201,33 +271,99 @@ namespace Rubberduck.Automation
             }
         }
 
-        private void Dismiss(IntPtr hwnd, DialogDismissAction action)
+        private void Dismiss(IntPtr hwnd, DialogDismissAction action, IReadOnlyList<ChildWindowInfo> buttons)
         {
-            switch (action)
+            var candidates = buttons
+                .Select(b => new DialogButtonCandidate(b.ControlId, b.Text))
+                .ToList();
+
+            var selectedControlId = DialogButtonSelector.SelectButton(action, candidates);
+            if (selectedControlId.HasValue)
             {
-                case DialogDismissAction.Ok:
-                    ClickButtonOrFallBack(hwnd, IDOK);
-                    break;
-                case DialogDismissAction.EndOrCancel:
-                    ClickButtonOrFallBack(hwnd, IDCANCEL);
-                    break;
-                default:
-                    PostMessage(hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
-                    break;
+                var button = buttons.FirstOrDefault(b => b.ControlId == selectedControlId.Value);
+                if (button.Handle != IntPtr.Zero)
+                {
+                    Logger.Info(
+                        "HeadlessDialogInterceptor dismissing dialog 0x{0:X} via BM_CLICK on control id {1} ('{2}').",
+                        hwnd.ToInt64(), button.ControlId, button.Text);
+                    SendMessage(button.Handle, BM_CLICK, IntPtr.Zero, IntPtr.Zero);
+                    return;
+                }
             }
+
+            // Fallback 1: the classic MessageBox IDOK id, in case this dialog variant DOES use
+            // the standard id but wasn't picked up as a "Button"-class child for some reason.
+            var fallbackButton = GetDlgItem(hwnd, IDOK);
+            if (action == DialogDismissAction.Ok && fallbackButton != IntPtr.Zero)
+            {
+                Logger.Info(
+                    "HeadlessDialogInterceptor dismissing dialog 0x{0:X} via WM_COMMAND on fallback IDOK (no captioned button matched).",
+                    hwnd.ToInt64());
+                PostMessage(hwnd, WM_COMMAND, (IntPtr)IDOK, IntPtr.Zero);
+                return;
+            }
+
+            // Fallback 2: WM_CLOSE always dismisses a modal dialog, even one with no system menu.
+            Logger.Info(
+                "HeadlessDialogInterceptor dismissing dialog 0x{0:X} via WM_CLOSE fallback (action {1}, no matching button found).",
+                hwnd.ToInt64(), action);
+            PostMessage(hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
         }
 
-        private void ClickButtonOrFallBack(IntPtr hwnd, int controlId)
+        private struct ChildWindowInfo
         {
-            var button = GetDlgItem(hwnd, controlId);
-            if (button != IntPtr.Zero)
+            public IntPtr Handle;
+            public int ControlId;
+            public string ClassName;
+            public string Text;
+        }
+
+        private static List<ChildWindowInfo> EnumerateChildren(IntPtr hwnd)
+        {
+            var children = new List<ChildWindowInfo>();
+
+            EnumChildWindows(hwnd, (childHwnd, _) =>
             {
-                PostMessage(hwnd, WM_COMMAND, (IntPtr)controlId, IntPtr.Zero);
-            }
-            else
+                var classNameBuffer = new StringBuilder(64);
+                GetClassName(childHwnd, classNameBuffer, classNameBuffer.Capacity);
+                children.Add(new ChildWindowInfo
+                {
+                    Handle = childHwnd,
+                    ControlId = GetDlgCtrlID(childHwnd),
+                    ClassName = classNameBuffer.ToString(),
+                    Text = GetChildTextSafe(childHwnd)
+                });
+                return true;
+            }, IntPtr.Zero);
+
+            return children;
+        }
+
+        private static string FindDialogText(IntPtr hwnd, IReadOnlyList<ChildWindowInfo> children)
+        {
+            var messageControl = children.FirstOrDefault(c =>
+                (c.ClassName == StaticClassName || c.ClassName == EditClassName) && !string.IsNullOrEmpty(c.Text));
+
+            if (!string.IsNullOrEmpty(messageControl.Text))
             {
-                PostMessage(hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+                return messageControl.Text;
             }
+
+            // Fallback: the fixed id-range read some VBE dialog variants still use.
+            return GetDialogTextSafe(hwnd);
+        }
+
+        private static string GetChildTextSafe(IntPtr hwnd)
+        {
+            var length = SendMessage(hwnd, WM_GETTEXTLENGTH, IntPtr.Zero, IntPtr.Zero).ToInt32();
+            if (length <= 0)
+            {
+                return string.Empty;
+            }
+
+            var buffer = new StringBuilder(length + 1);
+            SendMessage(hwnd, WM_GETTEXT, (IntPtr)buffer.Capacity, buffer);
+            return buffer.ToString();
         }
 
         private static string GetWindowTextSafe(IntPtr hwnd)
@@ -237,10 +373,11 @@ namespace Rubberduck.Automation
             return buffer.ToString();
         }
 
-        // The VBE's modal dialogs surface their message in a static/edit child control; control
-        // id 0xFFFF (-1) is not a reliable constant across dialog variants, so this walks the
-        // handful of low child ids the classic VBE dialogs use rather than enumerating every
-        // child window for a single line of text.
+        // Fallback used only when no "Static"/"Edit" child carries the message (see
+        // FindDialogText): the VBE's modal dialogs surface their message in a static/edit child
+        // control; control id 0xFFFF (-1) is not a reliable constant across dialog variants, so
+        // this walks the handful of low child ids the classic VBE dialogs use rather than
+        // enumerating every child window for a single line of text.
         private static string GetDialogTextSafe(IntPtr hwnd)
         {
             for (var childId = 0xFFFF; childId >= 0xFFF0; childId--)
@@ -251,17 +388,10 @@ namespace Rubberduck.Automation
                     continue;
                 }
 
-                var length = SendMessage(child, WM_GETTEXTLENGTH, IntPtr.Zero, IntPtr.Zero).ToInt32();
-                if (length <= 0)
+                var text = GetChildTextSafe(child);
+                if (text.Length > 0)
                 {
-                    continue;
-                }
-
-                var buffer = new StringBuilder(length + 1);
-                SendMessage(child, WM_GETTEXT, (IntPtr)buffer.Capacity, buffer);
-                if (buffer.Length > 0)
-                {
-                    return buffer.ToString();
+                    return text;
                 }
             }
 
