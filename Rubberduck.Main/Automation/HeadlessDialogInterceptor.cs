@@ -47,6 +47,7 @@ namespace Rubberduck.Automation
         private const int WH_CBT = 5;
         private const int WH_GETMESSAGE = 3;
         private const int HC_ACTION = 0;
+        private const int PM_REMOVE = 1;
         private const int HCBT_CREATEWND = 3;
         private const int HCBT_ACTIVATE = 5;
         private const string DialogClassName = "#32770";
@@ -233,11 +234,18 @@ namespace Rubberduck.Automation
         // by Dismiss() right after a CompileError dialog is dismissed, and only then -- outside
         // the WH_CBT callback's own call stack, once the dialog's modal loop has already unwound
         // past the dismissal -- runs the VBE project reset.
+        //
+        // A WH_GETMESSAGE hook fires on every PeekMessage, including a PM_NOREMOVE peek that
+        // leaves the message queued -- so the SAME still-queued message can be observed several
+        // times before it is finally removed. Only act on wParam == PM_REMOVE (the message is
+        // actually being taken off the queue for dispatch) so the reset runs once per posted
+        // message instead of once per peek (confirmed live: without this check, one posted
+        // message triggered several redundant, harmless-but-wasteful Reset executions).
         private IntPtr GetMessageHookCallback(int code, IntPtr wParam, IntPtr lParam)
         {
             try
             {
-                if (code == HC_ACTION && lParam != IntPtr.Zero)
+                if (code == HC_ACTION && wParam.ToInt32() == PM_REMOVE && lParam != IntPtr.Zero)
                 {
                     var message = (NativeMessage)Marshal.PtrToStructure(lParam, typeof(NativeMessage));
                     if (message.Message == _resetMessageId)
