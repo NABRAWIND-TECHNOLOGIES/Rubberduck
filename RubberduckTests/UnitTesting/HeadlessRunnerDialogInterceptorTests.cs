@@ -33,6 +33,40 @@ namespace RubberduckTests.UnitTesting
             Assert.AreEqual(expectedAction, DialogClassifier.ActionFor(kind));
         }
 
+        // D13 addendum: only a compile error leaves the VBA project in an un-resettable break
+        // state (confirmed by the PR5e hotfix live smoke -- a runtime Debug/End prompt's "End"
+        // click cleanly aborts the running Sub instead).
+        [TestCase(DialogKind.CompileError, true)]
+        [TestCase(DialogKind.RuntimeDebugEndPrompt, false)]
+        [TestCase(DialogKind.Unrecognized, false)]
+        public void RequiresProjectReset_ByKind_ReturnsExpected(DialogKind kind, bool expected)
+        {
+            Assert.AreEqual(expected, DialogClassifier.RequiresProjectReset(kind));
+        }
+
+        #endregion
+
+        #region VbeMenuCaptionMatcher
+
+        [TestCase("&Reset", "Reset", true)]
+        [TestCase("Reset", "reset", true)]
+        [TestCase("  &Reset  ", "Reset", true)]
+        [TestCase("&Finalizar", "Reset", false)]
+        [TestCase(null, "Reset", false)]
+        public void Matches_AcceleratorAndCaseInsensitive_ReturnsExpected(string caption, string wanted, bool expected)
+        {
+            Assert.AreEqual(expected, VbeMenuCaptionMatcher.Matches(caption, wanted));
+        }
+
+        [TestCase("&Reset", "Reset", true)]
+        [TestCase("Reset Pro&ject", "Reset", true)]
+        [TestCase("&Run Sub/UserForm", "Reset", false)]
+        [TestCase(null, "Reset", false)]
+        public void ContainsWord_AcceleratorAndCaseInsensitive_ReturnsExpected(string caption, string wanted, bool expected)
+        {
+            Assert.AreEqual(expected, VbeMenuCaptionMatcher.ContainsWord(caption, wanted));
+        }
+
         #endregion
 
         #region DialogDiagnosticFormatter
