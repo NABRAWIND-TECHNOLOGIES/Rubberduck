@@ -137,6 +137,95 @@ namespace RubberduckTests.UnitTesting
 
         #endregion
 
+        #region DialogButtonSelector
+
+        // Live-smoke root cause (PR5e hotfix): the VBE's compile-error dialog is a hand-authored
+        // resource, not a standard MessageBox -- its OK button is NOT control id 1 (IDOK), so the
+        // original fixed-id dismissal never found it and the dialog was left on screen. Selection
+        // must go by button caption instead.
+        [Test]
+        public void SelectButton_Ok_MatchesOkButtonRegardlessOfControlId()
+        {
+            var candidates = new[]
+            {
+                new DialogButtonCandidate(37, "&OK"),
+                new DialogButtonCandidate(38, "Help")
+            };
+
+            var selected = DialogButtonSelector.SelectButton(DialogDismissAction.Ok, candidates);
+
+            Assert.AreEqual(37, selected);
+        }
+
+        [Test]
+        public void SelectButton_Ok_MatchesLocalizedAceptarButton()
+        {
+            var candidates = new[] { new DialogButtonCandidate(42, "&Aceptar") };
+
+            var selected = DialogButtonSelector.SelectButton(DialogDismissAction.Ok, candidates);
+
+            Assert.AreEqual(42, selected);
+        }
+
+        [Test]
+        public void SelectButton_EndOrCancel_NeverSelectsTheDebugButton()
+        {
+            var candidates = new[]
+            {
+                new DialogButtonCandidate(1, "&Debug"),
+                new DialogButtonCandidate(2, "&End"),
+                new DialogButtonCandidate(3, "Help")
+            };
+
+            var selected = DialogButtonSelector.SelectButton(DialogDismissAction.EndOrCancel, candidates);
+
+            Assert.AreEqual(2, selected);
+        }
+
+        [Test]
+        public void SelectButton_EndOrCancel_MatchesLocalizedFinalizarButton()
+        {
+            var candidates = new[]
+            {
+                new DialogButtonCandidate(7, "&Depurar"),
+                new DialogButtonCandidate(8, "&Finalizar")
+            };
+
+            var selected = DialogButtonSelector.SelectButton(DialogDismissAction.EndOrCancel, candidates);
+
+            Assert.AreEqual(8, selected);
+        }
+
+        [Test]
+        public void SelectButton_Close_AlwaysReturnsNullSoCallerFallsBackToWmClose()
+        {
+            var candidates = new[] { new DialogButtonCandidate(1, "OK") };
+
+            var selected = DialogButtonSelector.SelectButton(DialogDismissAction.Close, candidates);
+
+            Assert.IsNull(selected);
+        }
+
+        [Test]
+        public void SelectButton_NoMatchingButtonText_ReturnsNullSoCallerFallsBackToWmClose()
+        {
+            var candidates = new[] { new DialogButtonCandidate(1, "Retry"), new DialogButtonCandidate(2, "Ignore") };
+
+            var selected = DialogButtonSelector.SelectButton(DialogDismissAction.Ok, candidates);
+
+            Assert.IsNull(selected);
+        }
+
+        [Test]
+        public void SelectButton_NoCandidates_ReturnsNull()
+        {
+            var selected = DialogButtonSelector.SelectButton(DialogDismissAction.Ok, new DialogButtonCandidate[0]);
+
+            Assert.IsNull(selected);
+        }
+
+        #endregion
+
         #region Runner attachment (RubberduckTestRunner subscribes to TestStarted/TestCompleted)
 
         private sealed class ManualClock
